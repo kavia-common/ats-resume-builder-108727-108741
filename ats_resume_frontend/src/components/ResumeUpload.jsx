@@ -1,6 +1,9 @@
 import React, { useRef, useState } from 'react';
 import { useResumeStore } from '../store/useResumeStore';
 import { parseResumeFile } from '../utils/resumeParser';
+import * as pdfjsLib from 'pdfjs-dist';
+import workerUrl from 'pdfjs-dist/build/pdf.worker.min.js';
+import { ocrImageBlobToText } from '../utils/ocr';
 
 // PUBLIC_INTERFACE
 export function ResumeUpload() {
@@ -93,13 +96,101 @@ export function ResumeUpload() {
     if (Array.isArray(parsed.keywords)) setField('keywords', parsed.keywords);
   };
 
+  // Helper: render PDF to canvases and OCR them page by page
+  const ocrPdfFile = async (file) => {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+    const arrayBuffer = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = reject;
+      r.readAsArrayBuffer(file);
+    });
+
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2.0 }); // higher scale for better OCR
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      const renderContext = { canvasContext: context, viewport };
+      await page.render(renderContext).promise;
+
+      // Convert canvas to Blob then OCR
+      const pageText = await new Promise((resolve, reject) => {
+        canvas.toBlob(async (blob) => {
+          try {
+            const text = await ocrImageBlobToText(blob, 'eng');
+            resolve(text);
+          } catch (err) {
+            reject(err);
+          }
+        }, 'image/png', 0.95);
+      });
+
+      fullText += (pageText || '') + '\n';
+    }
+    return fullText.trim();
+  };
+
   const onFileChange = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setStatus({ state: 'parsing', message: 'Parsing resume…' });
 
     try {
-      const parsed = await parseResumeFile(file);
+      // First attempt: normal structured parsing
+      let parsed;
+      try {
+        parsed = await parseResumeFile(file);
+      } catch (primaryErr) {
+        // If PDF or image, optionally offer OCR
+        const isPdf = file.type === 'application/pdf' || (file.name || '').toLowerCase().endsWith('.pdf');
+        const isImage = (file.type || '').startsWith('image/');
+        const primaryMsg = primaryErr?.message || '';
+        const likelyNoText = primaryMsg.toLowerCase().includes('could not extract text') || primaryMsg.toLowerCase().includes('scanned');
+
+        if ((isPdf || isImage) && likelyNoText) {
+          const confirmOcr = window.confirm('It looks like this file has no selectable text (possibly scanned). Run OCR to extract text? This may take a moment.');
+          if (confirmOcr) {
+            setStatus({ state: 'parsing', message: 'Running OCR…' });
+            let ocrText = '';
+            if (isPdf) {
+              ocrText = await ocrPdfFile(file);
+            } else if (isImage) {
+              ocrText = await ocrImageBlobToText(file, 'eng');
+            }
+
+            if (!ocrText || ocrText.trim().length < 10) {
+              throw new Error('OCR could not recognize enough text. Please try a clearer scan or a DOCX/TXT file.');
+            }
+
+            // Feed OCR text to a minimal parsed structure and reuse mapping
+            parsed = {
+              personal: {}, // will be inferred by map if any
+              summary: ocrText.split('\n').slice(0, 10).join(' ').slice(0, 1000), // a short start as summary
+              experience: [],
+              projects: [],
+              education: [],
+              skills: [],
+              certifications: [],
+              conferences: [],
+              publications: [],
+              keywords: []
+            };
+          } else {
+            throw primaryErr;
+          }
+        } else {
+          // Non-PDF/image or different error
+          throw primaryErr;
+        }
+      }
+
+      // Map to store
       mapParsedToStore(parsed);
       setStatus({ state: 'success', message: 'Resume parsed! Review and refine the fields.' });
     } catch (err) {
