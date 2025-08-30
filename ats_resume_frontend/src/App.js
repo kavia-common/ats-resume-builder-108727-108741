@@ -4,6 +4,7 @@ import './index.css';
 import { useResumeStore } from './store/useResumeStore';
 import { Header } from './components/Header';
 import { Steps } from './components/Steps';
+import { ResumeUpload } from './components/ResumeUpload';
 import { MultiStepForm } from './components/forms/MultiStepForm';
 import { ResumePreview } from './components/preview/ResumePreview';
 import { computeAtsScore } from './utils/atsScore';
@@ -44,6 +45,7 @@ function App() {
       <main className="main-layout">
         <section className="left-pane">
           <Steps />
+          <ResumeUpload />
           <MultiStepForm />
         </section>
         <section className="right-pane">
