@@ -1,47 +1,71 @@
-import React, { useState, useEffect } from 'react';
-import logo from './logo.svg';
+import React, { useEffect, useMemo, useState } from 'react';
 import './App.css';
+import './index.css';
+import { useResumeStore } from './store/useResumeStore';
+import { Header } from './components/Header';
+import { Steps } from './components/Steps';
+import { MultiStepForm } from './components/forms/MultiStepForm';
+import { ResumePreview } from './components/preview/ResumePreview';
+import { computeAtsScore } from './utils/atsScore';
+import { exportAsPdf } from './utils/pdf';
+
+const primary = '#2563eb';
+const secondary = '#64748b';
+const accent = '#10b981';
 
 // PUBLIC_INTERFACE
 function App() {
+  /** App shell manages theme, layout, and connects store to preview and form. */
   const [theme, setTheme] = useState('light');
+  const { data, setAtsScore, atsScore, template } = useResumeStore();
 
-  // Effect to apply theme to document element
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
-  // PUBLIC_INTERFACE
-  const toggleTheme = () => {
-    setTheme(prevTheme => prevTheme === 'light' ? 'dark' : 'light');
+  const score = useMemo(() => computeAtsScore(data), [data]);
+
+  useEffect(() => {
+    setAtsScore(score.value, score.feedback);
+  }, [score, setAtsScore]);
+
+  const handleExport = async () => {
+    await exportAsPdf('resume-preview', `Resume_${data.personal.fullName || 'My'}.pdf`);
   };
 
   return (
-    <div className="App">
-      <header className="App-header">
-        <button 
-          className="theme-toggle" 
-          onClick={toggleTheme}
-          aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
-        >
-          {theme === 'light' ? '🌙 Dark' : '☀️ Light'}
-        </button>
-        <img src={logo} className="App-logo" alt="logo" />
-        <p>
-          Edit <code>src/App.js</code> and save to reload.
-        </p>
-        <p>
-          Current theme: <strong>{theme}</strong>
-        </p>
-        <a
-          className="App-link"
-          href="https://reactjs.org"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Learn React
-        </a>
-      </header>
+    <div className="app-root" data-theme="light">
+      <Header
+        theme={theme}
+        setTheme={setTheme}
+        colors={{ primary, secondary, accent }}
+        onExport={handleExport}
+      />
+      <main className="main-layout">
+        <section className="left-pane">
+          <Steps />
+          <MultiStepForm />
+        </section>
+        <section className="right-pane">
+          <div className="ats-score">
+            <div className="score-circle" style={{ borderColor: primary }}>
+              <span>{atsScore.value}</span>
+            </div>
+            <div className="score-details">
+              <h4>ATS Score</h4>
+              <ul>
+                {atsScore.feedback.slice(0, 4).map((f, i) => (
+                  <li key={i}>{f}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+          <ResumePreview id="resume-preview" data={data} template={template} colors={{ primary, secondary, accent }} />
+        </section>
+      </main>
+      <footer className="app-footer">
+        <small>© {new Date().getFullYear()} ATS Resume Builder. Optimized for modern browsers.</small>
+      </footer>
     </div>
   );
 }
