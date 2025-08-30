@@ -1,19 +1,16 @@
-// Use CRA-compatible entry points from pdfjs-dist
 import * as pdfjsLib from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.js';
+import mammoth from 'mammoth';
 
 /**
- * Minimal client-side parsing utilities without backend:
- * - PDF: uses pdfjs-dist to extract text
- * - DOCX: uses a naive approach: read as ArrayBuffer -> try to locate text via unzip fallback is not used here to avoid adding heavy deps;
- *         we fallback to reading as text if browser infers text/plain, otherwise we throw a helpful error to the user.
+ * Enhanced client-side parsing utilities:
+ * - PDF: pdfjs-dist text extraction
+ * - DOCX: mammoth to extract raw text (robust for most .docx resumes)
  * - TXT: plain text
- * Then, apply heuristic parsing to extract personal info, sections, and bullets.
+ * Then, heuristic parsing to extract personal info, sections, and bullets, with better Unicode handling.
  */
 
 // Configure pdfjs worker
-// For CRA, the imported workerUrl is a module that resolves to the built asset URL.
-// Assign it directly so pdfjs can spawn the worker correctly.
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
 // Regex helpers
@@ -52,16 +49,21 @@ async function extractPdfText(file) {
   return fullText;
 }
 
-async function extractDocxTextFallback(file) {
-  // We don't add a heavy unzip/docx parser dependency. Provide a graceful message.
-  // Some browsers may expose docx with text content when copied from certain generators; try readAsText.
+async function extractDocxText(file) {
+  // Prefer mammoth for DOCX; fall back to plain text if something goes wrong
+  const arrayBuffer = await readAsArrayBuffer(file);
   try {
-    const txt = await readAsText(file);
-    if (typeof txt === 'string' && txt.trim().length > 0) return txt;
+    const { value } = await mammoth.extractRawText({ arrayBuffer });
+    // mammoth returns a single string separated by \n between paragraphs
+    return (value || '').replace(/\r/g, '');
   } catch (e) {
-    // ignore
+    // Fallback: try readAsText when browser infers something usable
+    try {
+      const txt = await readAsText(file);
+      if (typeof txt === 'string' && txt.trim().length > 0) return txt;
+    } catch (_) { /* ignore */ }
+    throw new Error('Failed to parse DOCX. Please try exporting your resume as a text-based PDF or TXT.');
   }
-  throw new Error('DOCX parsing not supported in this build. Please upload a PDF or a TXT export of your resume.');
 }
 
 async function extractTxt(file) {
@@ -72,30 +74,40 @@ function splitSections(text) {
   const normalized = text.replace(/\r/g, '');
   const lines = normalized.split('\n').map(l => l.trim()).filter(Boolean);
 
-  // Attempt to detect section boundaries by common headings
+  // Attempt to detect section boundaries by common headings and variations
   const sections = {};
   let current = 'header';
   sections[current] = [];
 
   const headings = [
-    'summary', 'professional summary', 'experience', 'work experience', 'employment',
-    'projects', 'education', 'skills', 'certifications', 'certification',
-    'conferences', 'publications', 'awards', 'achievements'
+    // common
+    'summary', 'professional summary', 'profile', 'objective',
+    'experience', 'work experience', 'employment', 'professional experience',
+    'projects', 'selected projects',
+    'education', 'academic background',
+    'skills', 'technical skills', 'toolkit',
+    'certifications', 'certification',
+    'conferences', 'talks',
+    'publications', 'awards', 'achievements'
   ];
 
   for (const line of lines) {
     const lower = line.toLowerCase();
-    const matched = headings.find(h => lower.startsWith(h));
+    // also treat ALL-CAPS single words as potential headings
+    const isAllCaps = /^[A-Z\s&/+-]{3,}$/.test(line) && line.length < 40;
+    const matched = headings.find(h => lower.startsWith(h)) || (isAllCaps ? lower : null);
     if (matched) {
-      current = matched.includes('summary') ? 'summary'
-        : matched.includes('experience') || matched === 'employment' ? 'experience'
-        : matched.includes('project') ? 'projects'
-        : matched.includes('education') ? 'education'
-        : matched.includes('skill') ? 'skills'
-        : matched.includes('certification') ? 'certifications'
-        : matched.includes('conference') ? 'conferences'
-        : matched.includes('publication') ? 'publications'
-        : 'other';
+      current =
+        matched.includes('summary') || matched.includes('profile') || matched.includes('objective') ? 'summary' :
+        matched.includes('experience') || matched === 'employment' ? 'experience' :
+        matched.includes('project') ? 'projects' :
+        matched.includes('education') || matched.includes('academic') ? 'education' :
+        matched.includes('skill') || matched.includes('toolkit') ? 'skills' :
+        matched.includes('certification') ? 'certifications' :
+        matched.includes('conference') || matched.includes('talk') ? 'conferences' :
+        matched.includes('publication') ? 'publications' :
+        matched.includes('award') || matched.includes('achievement') ? 'achievements' :
+        'other';
       if (!sections[current]) sections[current] = [];
       continue;
     }
@@ -116,10 +128,10 @@ function parsePersonal(text) {
 }
 
 function bulletsFrom(lines) {
-  // Convert dash/star bullets into bullet lines
+  // Convert common bullet characters (hyphen, en dash, em dash, bullet, asterisk)
   const bullets = [];
   lines.forEach(line => {
-    const m = line.match(/^[-•*]\s*(.+)$/);
+    const m = line.match(/^[-–—•*]\s*(.+)$/);
     if (m) bullets.push(m[1]);
   });
   // If no explicit bullets, chunk by sentences as fallback
@@ -134,7 +146,7 @@ function bulletsFrom(lines) {
 }
 
 function parseExperience(lines) {
-  // Very simple heuristic: group every 3-6 lines as one job, look for date ranges
+  // Heuristic: group every 3-7 lines as one job, look for date ranges
   const items = [];
   let block = [];
   const flush = () => {
@@ -142,7 +154,7 @@ function parseExperience(lines) {
     const header = block[0] || '';
     const [titlePart, companyPart] = header.split('—').map(s => s.trim());
     const dateLine = block.find(l => /\b(20\d{2}|19\d{2})\b/.test(l)) || '';
-    const [startDate = '', endDate = ''] = dateLine.split(/-|–|to/i).map(s => s.trim());
+    const [startDate = '', endDate = ''] = dateLine.split(/-|–|—|to/i).map(s => s.trim());
     const descLines = block.slice(1);
     items.push({
       title: (titlePart || '').trim(),
@@ -157,10 +169,9 @@ function parseExperience(lines) {
 
   lines.forEach((l) => {
     if (/^\s*$/.test(l)) return;
-    if (/^[-•*]\s+/.test(l) || /\b(20\d{2}|19\d{2})\b/.test(l) || block.length === 0) {
-      // keep collecting lines for this block
+    if (/^[-–—•*]\s+/.test(l) || /\b(20\d{2}|19\d{2})\b/.test(l) || block.length === 0) {
       block.push(l);
-      if (block.length >= 6) {
+      if (block.length >= 7) {
         flush();
       }
     } else {
@@ -172,7 +183,6 @@ function parseExperience(lines) {
 }
 
 function parseEducation(lines) {
-  // Heuristic: 1st non-empty is school - degree on same or next line, then dates
   if (!lines || lines.length === 0) return [];
   const joined = lines.join(' ');
   const yearMatches = joined.match(/\b(20\d{2}|19\d{2})\b/g) || [];
@@ -198,7 +208,6 @@ function parseSkills(lines) {
 }
 
 function parseProjects(lines) {
-  // Similar to experience but lighter
   if (!lines || lines.length === 0) return [];
   const items = [];
   let block = [];
@@ -207,7 +216,7 @@ function parseProjects(lines) {
     const header = block[0] || '';
     const [title, subtitle] = header.split('—').map(s => s.trim());
     const dateLine = block.find(l => /\b(20\d{2}|19\d{2})\b/.test(l)) || '';
-    const [startDate = '', endDate = ''] = dateLine.split(/-|–|to/i).map(s => s.trim());
+    const [startDate = '', endDate = ''] = dateLine.split(/-|–|—|to/i).map(s => s.trim());
     items.push({
       title: title || '',
       subtitle: subtitle || '',
@@ -220,7 +229,7 @@ function parseProjects(lines) {
   lines.forEach(l => {
     if (/^\s*$/.test(l)) return;
     block.push(l);
-    if (block.length >= 6) flush();
+    if (block.length >= 7) flush();
   });
   flush();
   return items.filter(it => it.title || it.bullets?.length);
@@ -249,16 +258,19 @@ export async function parseResumeFile(file) {
 
   if (file.type === 'application/pdf' || ext === 'pdf') {
     rawText = await extractPdfText(file);
-  } else if (ext === 'docx' || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || ext === 'doc' || file.type === 'application/msword') {
-    rawText = await extractDocxTextFallback(file);
-  } else if (ext === 'txt' || file.type.startsWith('text/')) {
+  } else if (ext === 'docx' || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    rawText = await extractDocxText(file);
+  } else if (ext === 'doc' || file.type === 'application/msword') {
+    // Older .doc not supported by mammoth; hint user to convert
+    throw new Error('Legacy .doc files are not supported. Please convert to .docx, PDF, or TXT and try again.');
+  } else if (ext === 'txt' || (file.type && file.type.startsWith('text/'))) {
     rawText = await extractTxt(file);
   } else {
     throw new Error('Unsupported file type. Please upload a PDF, DOCX, or TXT file.');
   }
 
   if (!rawText || rawText.trim().length < 20) {
-    throw new Error('Could not extract text from the file. Try a text-based PDF (not a scanned image) or a TXT export.');
+    throw new Error('Could not extract text from the file. If uploading a scanned PDF, try OCR or use a DOCX/TXT.');
   }
 
   const sections = splitSections(rawText);

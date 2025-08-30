@@ -123,7 +123,7 @@ export function ResumeUpload() {
       <button className="btn" type="button" onClick={handleClick}>📄 Upload Resume</button>
       {status.state === 'parsing' && <small className="text-muted">Parsing…</small>}
       {status.state === 'success' && <small style={{ color: 'var(--accent)' }}>{status.message}</small>}
-      {status.state === 'error' && <small className="error">{status.message}</small>}
+      {status.state === 'error' && <small className="error">{status.message} (PDF/DOCX/TXT supported)</small>}
     </div>
   );
 }
